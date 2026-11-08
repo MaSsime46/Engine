@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0e13">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Phantom Engine</title>
+<style>
+/* Layout: one column instrument cluster. Tach on top with the gear sitting in the gap at the bottom of the dial,
+   status and start button next, then settings. Single dark theme on purpose: it is used in a car, often at night. */
+:root{
+  --bg:#0b0e13;
+  --panel:#141922;
+  --panel2:#1b222d;
+  --line:#293241;
+  --fg:#e9eef5;
+  --muted:#8c98aa;
+  --accent:#5cc8ff;
+  --accentink:#04202e;
+  --needle:#ff5533;
+  --redline:#d6392a;
+  --good:#46d68c;
+  --warn:#ffb020;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--bg);color:var(--fg);
+  font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  -webkit-tap-highlight-color:transparent;
+  padding-block:max(12px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-bottom));
+  padding-left:max(16px,env(safe-area-inset-left));
+  padding-right:max(16px,env(safe-area-inset-right));
+}
+.app{max-width:480px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+h1{margin:0;font-size:18px;font-weight:650;letter-spacing:.02em}
+.sub{color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+
+.dial{position:relative;width:min(100%,360px);aspect-ratio:1;margin:0 auto}
+.dial canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.readout{position:absolute;left:0;right:0;top:57%;text-align:center;pointer-events:none}
+.speed{font-size:clamp(44px,15vw,64px);font-weight:300;line-height:1;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.unit{color:var(--muted);font-size:12px;letter-spacing:.14em;text-transform:uppercase;margin-top:2px}
+.gear{position:absolute;left:50%;bottom:3%;transform:translateX(-50%);min-width:44px;text-align:center;padding:3px 12px;border:1px solid var(--line);border-radius:999px;background:var(--panel);font-weight:650;font-size:18px;font-variant-numeric:tabular-nums}
+
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.stat{background:var(--panel);border-radius:12px;padding:10px 12px;min-width:0}
+.stat b{display:block;font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+.stat span{color:var(--muted);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+.bar{height:4px;border-radius:2px;background:var(--line);margin-top:6px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--accent)}
+
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip,.btn{font:inherit;color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 14px;cursor:pointer;touch-action:manipulation}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accentink);font-weight:650}
+.btn.primary{width:100%;height:58px;border-radius:14px;font-size:17px;font-weight:700;background:var(--accent);border-color:var(--accent);color:var(--accentink)}
+.btn.primary.on{background:transparent;color:var(--fg);border-color:var(--line)}
+.btn[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.status{display:flex;flex-wrap:wrap;gap:8px 14px;color:var(--muted);font-size:12px}
+.status span::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--line);margin-right:6px}
+.status span[data-s="ok"]::before{background:var(--good)}
+.status span[data-s="wait"]::before{background:var(--warn)}
+.note{margin:0;color:var(--fg);min-height:2.8em}
+
+.card{background:var(--panel);border-radius:14px;padding:14px;display:flex;flex-direction:column;gap:14px}
+.card h2{margin:0;font-size:12px;font-weight:600;color:var(--muted);letter-spacing:.1em;text-transform:uppercase}
+.row{display:flex;flex-direction:column;gap:6px}
+.row label{display:flex;justify-content:space-between;font-size:14px}
+.row label output{color:var(--muted);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--accent);height:32px;margin:0}
+.btns{display:flex;flex-wrap:wrap;gap:8px}
+.btns .btn{flex:1 1 120px}
+.test{display:none;flex-direction:column;gap:12px}
+.test.show{display:flex}
+.hold{height:52px;font-weight:650;user-select:none;-webkit-user-select:none}
+details{color:var(--muted);font-size:13px}
+details summary{cursor:pointer;color:var(--fg);font-size:14px}
+details ol{margin:10px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:6px}
+</style>
+</head>
+<body>
+<main class="app">
+  <header>
+    <h1>Phantom Engine</h1>
+    <span class="sub" id="engineName">V8</span>
+  </header>
+
+  <section class="dial" aria-label="Tachometer">
+    <canvas id="tach"></canvas>
+    <div class="readout"><div class="speed" id="speed">0</div><div class="unit">km/h</div></div>
+    <div class="gear" id="gear">N</div>
+  </section>
+
+  <section class="stats" aria-label="Live values">
+    <div class="stat"><span>RPM</span><b id="rpmVal">0</b></div>
+    <div class="stat"><span>Throttle</span><b id="loadVal">0%</b><div class="bar"><i id="loadBar"></i></div></div>
+    <div class="stat"><span>Accel</span><b id="accVal">0.0</b></div>
+  </section>
+
+  <button class="btn primary" id="startBtn" type="button">Start engine</button>
+
+  <div class="status" aria-live="polite">
+    <span id="stMotion" data-s="off">Motion</span>
+    <span id="stGps" data-s="off">GPS</span>
+    <span id="stCal" data-s="off">Calibration</span>
+  </div>
+  <p class="note" id="note"></p>
+
+  <section class="card">
+    <h2>Engine</h2>
+    <div class="chips" id="chips" role="group" aria-label="Engine type"></div>
+    <div class="row">
+      <label for="vol">Loudness <output id="volOut"></output></label>
+      <input id="vol" type="range" min="0" max="200" step="1">
+    </div>
+    <div class="row">
+      <label for="sens">Throttle sensitivity <output id="sensOut"></output></label>
+      <input id="sens" type="range" min="40" max="250" step="5">
+    </div>
+    <div class="btns">
+      <button class="btn" id="recal" type="button">Recalibrate</button>
+      <button class="btn" id="flip" type="button">Flip direction</button>
+      <button class="btn" id="simBtn" type="button" aria-pressed="false">Test drive</button>
+    </div>
+    <div class="test" id="test">
+      <div class="row">
+        <label for="thr">Throttle <output id="thrOut">0%</output></label>
+        <input id="thr" type="range" min="0" max="100" step="1" value="0">
+      </div>
+      <button class="btn hold" id="brake" type="button">Hold to brake</button>
+    </div>
+  </section>
+
+  <details class="card">
+    <summary>Using it in the car</summary>
+    <ol>
+      <li>Mount the phone so it cannot slide, with the car parked.</li>
+      <li>Connect the phone to the car by Bluetooth and set the car to that input.</li>
+      <li>Tap Start, keep still for a second, then pull away gently. That sets which way is forward.</li>
+      <li>Keep this page open on screen. Browsers stop the sensors and the sound when the screen locks or you switch apps.</li>
+      <li>Bluetooth delays the sound by a fraction of a second. That is normal.</li>
+      <li>If the engine feels too lazy or too eager, change throttle sensitivity. If it revs when you brake, tap Flip direction.</li>
+    </ol>
+  </details>
+</main>
+
+<script type="text/plain" id="worklet-src">
+class EngineProcessor extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [
+      { name: 'rpm',  defaultValue: 900, minValue: 0, maxValue: 16000, automationRate: 'k-rate' },
+      { name: 'load', defaultValue: 0.1, minValue: 0, maxValue: 1,     automationRate: 'k-rate' }
+    ];
+  }
+  constructor() {
+    super();
+    this.cfg = { cyl: 4, rough: 0.15, bright: 0.55, drive: 1, pipe: 1, noise: 0.5, pops: 0.3, redline: 7000 };
+    this.cyc = 0; this.lastK = -1; this.pulse = 0; this.pop = 0;
+    this.rpmS = 900; this.loadS = 0.1;
+    this.seed = 1337;
+    this.cylAmp = new Float32Array(16).fill(1);
+    this.lpOut = 0; this.dcX = 0; this.dcY = 0; this.nz1 = 0; this.nz2 = 0;
+    this.res = [];
+    this.port.onmessage = (e) => { Object.assign(this.cfg, e.data); this.setup(); };
+    this.setup();
+  }
+  rnd() { this.seed = (Math.imul(this.seed, 1664525) + 1013904223) >>> 0; return this.seed / 4294967296; }
+  setup() {
+    const c = this.cfg, sr = sampleRate;
+    const f = [92, 185, 320, 510, 790], q = [7, 6, 5, 4, 3], g = [1.0, 0.85, 0.6, 0.38, 0.22];
+    this.res = f.map((fr, i) => {
+      const w = Math.tan(Math.PI * Math.min(fr * c.pipe, sr * 0.45) / sr);
+      const k = 1 / q[i];
+      const a1 = 1 / (1 + w * (w + k));
+      return { k: k, a1: a1, a2: w * a1, a3: w * w * a1, g: g[i], s1: 0, s2: 0 };
+    });
+    for (let i = 0; i < 16; i++) this.cylAmp[i] = 1 + (this.rnd() - 0.5) * 2 * c.rough * 0.8;
+    this.lastK = -1;
+  }
+  process(inputs, outputs, params) {
+    const out = outputs[0];
+    const ch0 = out[0];
+    const n = ch0.length;
+    const rpmT = params.rpm[0], loadT = params.load[0];
+    const c = this.cfg, sr = sampleRate, cyl = Math.max(1, c.cyl | 0);
+    const pDecay = Math.exp(-1 / (sr * 0.0016));
+    const res = this.res, nr = res.length;
+    if (loadT < 0.06 && this.rpmS > 3000 && this.rnd() < 0.006 * c.pops) this.pop = 1;
+    const rr = Math.min(1, this.rpmS / c.redline);
+    const fc = 500 + 5000 * c.bright * (0.25 + 0.75 * this.loadS) * (0.5 + 0.5 * rr);
+    const lpA = 1 - Math.exp(-2 * Math.PI * fc / sr);
+    for (let i = 0; i < n; i++) {
+      this.rpmS += (rpmT - this.rpmS) * 0.0025;
+      this.loadS += (loadT - this.loadS) * 0.0008;
+      const rpm = this.rpmS, load = this.loadS;
+      this.cyc += rpm / 120 / sr;
+      if (this.cyc >= 1) this.cyc -= 1;
+      const k = Math.floor(this.cyc * cyl);
+      if (k !== this.lastK) {
+        this.lastK = k;
+        this.pulse = (0.30 + 0.70 * load) * this.cylAmp[k] * (1 + (this.rnd() - 0.5) * c.rough * 0.8);
+      }
+      let x = this.pulse;
+      this.pulse *= pDecay;
+      if (this.pop > 0.001) { x += this.pop * (this.rnd() * 2 - 1) * 0.8; this.pop *= 0.9985; } else { this.pop = 0; }
+      let y = 0;
+      for (let j = 0; j < nr; j++) {
+        const r = res[j];
+        const v3 = x - r.s2;
+        const v1 = r.a1 * r.s1 + r.a2 * v3;
+        const v2 = r.s2 + r.a2 * r.s1 + r.a3 * v3;
+        r.s1 = 2 * v1 - r.s1;
+        r.s2 = 2 * v2 - r.s2;
+        y += v1 * r.k * r.g;
+      }
+      const body = (y * 9 + x * 0.35);
+      const d = 1 + c.drive * (0.8 + 2.5 * load);
+      let s = Math.tanh(body * d);
+      const w = this.rnd() * 2 - 1;
+      this.nz1 += 0.15 * (w - this.nz1);
+      const nb = this.nz1 - this.nz2;
+      this.nz2 += 0.02 * (this.nz1 - this.nz2);
+      s += nb * c.noise * (0.02 + 0.22 * load) * (0.4 + 0.6 * rr) * 2.5;
+      this.lpOut += lpA * (s - this.lpOut);
+      const dc = this.lpOut - this.dcX + 0.997 * this.dcY;
+      this.dcX = this.lpOut; this.dcY = dc;
+      let o = dc * 0.32;
+      if (!(o === o) || o > 4 || o < -4) { o = 0; this.dcY = 0; this.lpOut = 0; for (let j = 0; j < nr; j++) { res[j].s1 = 0; res[j].s2 = 0; } }
+      ch0[i] = o;
+    }
+    for (let ch = 1; ch < out.length; ch++) out[ch].set(ch0);
+    return true;
+  }
+}
+registerProcessor('engine', EngineProcessor);
+</script>
+
+<script>
+(() => {
+'use strict';
+
+// <core>
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+
+const PROFILES = {
+  i4:  { name: 'Inline-4', cyl: 4,  idle: 850, redline: 7200, rough: 0.10, bright: 0.55, drive: 0.9, pipe: 1.15, noise: 0.5,  pops: 0.4, wob: 8 },
+  i6:  { name: 'Inline-6', cyl: 6,  idle: 800, redline: 7000, rough: 0.05, bright: 0.60, drive: 0.8, pipe: 1.0,  noise: 0.45, pops: 0.2, wob: 5 },
+  v6:  { name: 'V6',       cyl: 6,  idle: 850, redline: 7000, rough: 0.12, bright: 0.55, drive: 1.0, pipe: 1.1,  noise: 0.5,  pops: 0.3, wob: 7 },
+  v8:  { name: 'V8',       cyl: 8,  idle: 700, redline: 6500, rough: 0.30, bright: 0.40, drive: 1.6, pipe: 0.85, noise: 0.45, pops: 0.8, wob: 14 },
+  v10: { name: 'V10',      cyl: 10, idle: 900, redline: 8500, rough: 0.08, bright: 0.80, drive: 1.2, pipe: 1.3,  noise: 0.6,  pops: 0.5, wob: 6 }
+};
+const VTOP = [45, 75, 110, 150, 195, 250]; // km/h at redline for gears 1..6
+
+function newDrive() {
+  return { v: 0, g: 1, rpm: 300, load: 0.1, shiftT: 0, shiftDir: 0, t: 0, flare: 1 };
+}
+
+// inp: { mode: 'gps' | 'accel' | 'sim', af (m/s2), gpsV (m/s), gpsFresh, throttle (0..1 or null), sens }
+function stepDrive(D, P, inp, dt) {
+  D.t += dt;
+  const af = inp.af;
+  D.v += af * dt;
+  if (inp.mode === 'gps' && inp.gpsFresh) D.v += (inp.gpsV - D.v) * (1 - Math.exp(-dt / 1.0));
+  else if (inp.mode !== 'sim') D.v *= Math.exp(-dt / (inp.mode === 'gps' ? 15 : 12));
+  if (D.v < 0) D.v = 0;
+  const kmh = D.v * 3.6;
+
+  const load = inp.throttle != null ? inp.throttle
+    : clamp(0.10 + 0.18 * clamp(kmh / 150, 0, 1) + af * inp.sens / 3.2, 0, 1);
+
+  const K = g => 0.92 * P.redline / VTOP[g - 1];
+  D.shiftT = Math.max(0, D.shiftT - dt);
+  if (D.shiftT === 0) {
+    const wheel = kmh * K(D.g);
+    const downRpm = P.idle + 750;
+    const upRpm = Math.max(2800, P.idle + (P.redline - 700 - P.idle) * (0.2 + 0.8 * Math.pow(load, 1.3)));
+    if (D.g < 6 && wheel > upRpm && kmh * K(D.g + 1) > downRpm + 300) { D.g++; D.shiftT = 0.25; D.shiftDir = 1; }
+    else if (D.g > 1 && wheel < downRpm && kmh * K(D.g - 1) < P.redline - 800) { D.g--; D.shiftT = 0.15; D.shiftDir = -1; }
+  }
+
+  let tgt = Math.max(P.idle, kmh * K(D.g));
+  if (kmh < 22) {
+    const lt = clamp((load - 0.2) / 0.8, 0, 1);
+    tgt = Math.max(tgt, P.idle + lt * (P.redline * 0.5 - P.idle) * (1 - kmh / 22));
+  }
+  tgt += D.flare * 700;
+  D.flare = Math.max(0, D.flare - dt / 0.9);
+  let cut = false;
+  if (tgt >= P.redline) {
+    cut = Math.sin(D.t * 38) > 0;
+    tgt = P.redline - (cut ? 350 : 0);
+  }
+  const tau = tgt > D.rpm ? 0.07 : 0.14;
+  D.rpm += (tgt - D.rpm) * (1 - Math.exp(-dt / tau));
+  D.rpm = clamp(D.rpm, 0, P.redline);
+
+  let aLoad = load;
+  if (D.shiftT > 0.1 && D.shiftDir > 0) aLoad = load * 0.15;
+  if (cut) aLoad = 0.15;
+  D.load = load;
+  const wob = D.rpm < P.idle + 250 ? P.wob * (Math.sin(D.t * 7.3) + 0.6 * Math.sin(D.t * 11.9 + 1)) : 0;
+  return { rpm: Math.max(0, D.rpm + wob), load: aLoad };
+}
+
+// Phone orientation calibration. All vectors are in device axes, so it works in any mounting angle.
+const vdot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const vlen = a => Math.hypot(a[0], a[1], a[2]);
+const vnorm = a => { const l = vlen(a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+
+function newCal() {
+  return { state: 'idle', g0: null, fwd: null, sum: [0, 0, 0], n: 0, t0: 0, fsum: [0, 0, 0], fT: 0, bias: 0, flip: 1 };
+}
+function calBegin(c, tMs) {
+  c.state = 'gravity'; c.g0 = null; c.fwd = null; c.sum = [0, 0, 0]; c.n = 0; c.t0 = tMs;
+  c.fsum = [0, 0, 0]; c.fT = 0; c.bias = 0;
+}
+// r: accelerationIncludingGravity [x,y,z]; returns forward acceleration in m/s2 (0 until calibrated)
+function calStep(c, r, dt, tMs, steady) {
+  if (c.state === 'gravity') {
+    c.sum[0] += r[0]; c.sum[1] += r[1]; c.sum[2] += r[2]; c.n++;
+    if (tMs - c.t0 > 1200 && c.n > 20) {
+      c.g0 = [c.sum[0] / c.n, c.sum[1] / c.n, c.sum[2] / c.n];
+      c.state = 'forward'; c.fsum = [0, 0, 0]; c.fT = 0;
+    }
+    return 0;
+  }
+  if (!c.g0) return 0;
+  const lin = [r[0] - c.g0[0], r[1] - c.g0[1], r[2] - c.g0[2]];
+  if (c.state === 'forward') {
+    const gn = vnorm(c.g0), d = vdot(lin, gn);
+    const h = [lin[0] - gn[0] * d, lin[1] - gn[1] * d, lin[2] - gn[2] * d];
+    if (vlen(h) > 1.0) {
+      c.fsum[0] += h[0]; c.fsum[1] += h[1]; c.fsum[2] += h[2]; c.fT += dt;
+      if (c.fT > 0.35) { c.fwd = vnorm(c.fsum); c.state = 'ready'; }
+    } else if (c.fT > 0) {
+      c.fT = Math.max(0, c.fT - dt * 2);
+      if (c.fT === 0) c.fsum = [0, 0, 0];
+    }
+    return 0;
+  }
+  if (c.state !== 'ready') return 0;
+  const raw = vdot(lin, c.fwd) * c.flip;
+  const af = clamp(raw - c.bias, -9, 9);
+  if (steady && Math.abs(af) < 0.6) c.bias += (raw - c.bias) * Math.min(1, dt / 15);
+  return af;
+}
+// </core>
+
+const $ = id => document.getElementById(id);
+const S = { running: false, simOnly: false, engine: 'v8', vol: 1.2, sens: 1, sim: false, thr: 0, brake: false,
+            af: 0, motionOk: false, lastMotion: 0, tm: 0, steady: false, watch: null };
+const D = newDrive();
+const C = newCal();
+const G = { ok: false, v: 0, last: 0, denied: false };
+
+try {
+  const p = JSON.parse(localStorage.getItem('phantom-engine') || '{}');
+  if (PROFILES[p.engine]) S.engine = p.engine;
+  if (p.vol >= 0 && p.vol <= 2) S.vol = p.vol;
+  if (p.sens >= 0.4 && p.sens <= 2.5) S.sens = p.sens;
+} catch (e) {}
+const savePrefs = () => { try { localStorage.setItem('phantom-engine', JSON.stringify({ engine: S.engine, vol: S.vol, sens: S.sens })); } catch (e) {} };
+
+// ---- audio ----
+let ctx = null, node = null, master = null, rpmParam = null, loadParam = null, wake = null, timer = null, raf = 0, lastT = 0;
+
+function pushProfile() {
+  if (!node) return;
+  const P = PROFILES[S.engine];
+  node.port.postMessage({ cyl: P.cyl, rough: P.rough, bright: P.bright, drive: P.drive, pipe: P.pipe, noise: P.noise, pops: P.pops, redline: P.redline });
+}
+
+async function start(simOnly) {
+  if (S.running) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC || !window.AudioWorkletNode || !window.isSecureContext) {
+    S.msg = 'This page needs HTTPS and a current Chrome or Safari for live sound and sensors.';
+    ui(true);
+    return;
+  }
+  S.msg = '';
+  $('startBtn').disabled = true;
+  try {
+    if (navigator.audioSession) { try { navigator.audioSession.type = 'playback'; } catch (e) {} }
+    if (!ctx) ctx = new AC({ latencyHint: 'interactive' });
+    ctx.resume(); // must happen inside the tap
+    let motionAllowed = true;
+    if (!simOnly && typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+      try { motionAllowed = (await DeviceMotionEvent.requestPermission()) === 'granted'; } catch (e) { motionAllowed = false; }
+    }
+    if (!node) {
+      const url = URL.createObjectURL(new Blob([$('worklet-src').textContent], { type: 'text/javascript' }));
+      await ctx.audioWorklet.addModule(url);
+      node = new AudioWorkletNode(ctx, 'engine', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
+      rpmParam = node.parameters.get('rpm'); loadParam = node.parameters.get('load');
+      master = ctx.createGain(); master.gain.value = 0;
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = -8; comp.knee.value = 8; comp.ratio.value = 10; comp.attack.value = 0.003; comp.release.value = 0.12;
+      node.connect(master); master.connect(comp); comp.connect(ctx.destination);
+      pushProfile();
+    }
+    await ctx.resume();
+    master.gain.setTargetAtTime(S.vol, ctx.currentTime, 0.15);
+    Object.assign(D, newDrive());
+    S.running = true; S.simOnly = !!simOnly; S.motionOk = false; S.startedAt = performance.now();
+    if (!simOnly) startSensors(motionAllowed);
+    lastT = performance.now();
+    timer = setInterval(tick, 20);
+    acquireWake();
+    raf = requestAnimationFrame(frame);
+  } catch (err) {
+    S.msg = 'Could not start audio: ' + (err && err.message ? err.message : err);
+  } finally {
+    $('startBtn').disabled = false;
+    ui(true);
+  }
+}
+
+function stop() {
+  if (!S.running) return;
+  S.running = false;
+  clearInterval(timer); timer = null;
+  cancelAnimationFrame(raf);
+  window.removeEventListener('devicemotion', onMotion);
+  if (S.watch != null && navigator.geolocation) { navigator.geolocation.clearWatch(S.watch); S.watch = null; }
+  G.ok = false;
+  if (master) master.gain.setTargetAtTime(0, ctx.currentTime, 0.08);
+  setTimeout(() => { if (!S.running && ctx) ctx.suspend(); }, 500);
+  if (wake) { try { wake.release(); } catch (e) {} wake = null; }
+  if (S.sim && S.simOnly) { S.sim = false; $('simBtn').setAttribute('aria-pressed', 'false'); $('test').classList.remove('show'); }
+  Object.assign(D, newDrive()); D.rpm = 0;
+  ui(true); draw();
+}
+
+async function acquireWake() {
+  try { if ('wakeLock' in navigator && S.running) wake = await navigator.wakeLock.request('screen'); } catch (e) {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && S.running) { acquireWake(); if (ctx) ctx.resume(); }
+});
+
+// ---- sensors ----
+function startSensors(motionAllowed) {
+  if (motionAllowed) {
+    window.addEventListener('devicemotion', onMotion);
+    calBegin(C, performance.now());
+  } else {
+    S.msg = 'Motion access was declined. Reload the page and allow it, or use Test drive.';
+  }
+  if ('geolocation' in navigator) {
+    S.watch = navigator.geolocation.watchPosition(onGps, onGpsErr, { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 });
+  }
+}
+
+function onMotion(e) {
+  const a = e.accelerationIncludingGravity;
+  if (!a || a.x == null || a.y == null || a.z == null) return;
+  const t = performance.now();
+  let dt = (t - (S.tm || t)) / 1000; S.tm = t;
+  dt = clamp(dt, 0.001, 0.1);
+  S.motionOk = true; S.lastMotion = t;
+  const af = calStep(C, [a.x, a.y, a.z], dt, t, S.steady);
+  S.af += (af - S.af) * (1 - Math.exp(-dt / 0.12));
+}
+
+function onGps(p) {
+  const sp = p.coords.speed;
+  if (sp == null || !isFinite(sp) || sp < 0) return;
+  const t = performance.now();
+  if (G.ok && G.last) {
+    const ga = (sp - G.v) / Math.max(0.3, (t - G.last) / 1000);
+    S.steady = Math.abs(ga) < 0.2;
+  }
+  G.ok = true; G.v = sp; G.last = t;
+}
+function onGpsErr(err) { if (err && err.code === 1) G.denied = true; }
+
+// ---- main loop ----
+function tick() {
+  const t = performance.now();
+  const dt = clamp((t - lastT) / 1000, 0.001, 0.1);
+  lastT = t;
+  const P = PROFILES[S.engine];
+  let inp;
+  if (S.sim) {
+    const v = D.v, thr = S.thr;
+    const a = thr * 4.5 * (1 - v / 75) - 0.0006 * v * v - (v > 0.3 ? 0.15 : 0) - (S.brake ? 7 : 0);
+    inp = { mode: 'sim', af: a, throttle: S.brake ? 0.03 : 0.08 + 0.92 * thr, sens: S.sens };
+  } else {
+    inp = { mode: G.ok ? 'gps' : 'accel', af: C.state === 'ready' ? S.af : 0, gpsV: G.v,
+            gpsFresh: G.ok && (t - G.last) < 3000, throttle: null, sens: S.sens };
+  }
+  const o = stepDrive(D, P, inp, dt);
+  const now = ctx.currentTime;
+  rpmParam.setTargetAtTime(o.rpm, now, 0.02);
+  loadParam.setTargetAtTime(o.load, now, 0.03);
+  S.accShown = inp.af;
+}
+
+// ---- tach drawing ----
+const css = {};
+function readCss() {
+  const cs = getComputedStyle(document.documentElement);
+  ['panel', 'panel2', 'line', 'fg', 'muted', 'accent', 'needle', 'redline'].forEach(k => css[k] = cs.getPropertyValue('--' + k).trim());
+}
+function resizeCanvas() {
+  const cv = $('tach'), r = cv.getBoundingClientRect(), d = Math.min(window.devicePixelRatio || 1, 3);
+  cv.width = Math.round(r.width * d); cv.height = Math.round(r.height * d);
+  cv.getContext('2d').setTransform(d, 0, 0, d, 0, 0);
+}
+function draw() {
+  const cv = $('tach'), c = cv.getContext('2d');
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (!W) return;
+  c.clearRect(0, 0, W, H);
+  const P = PROFILES[S.engine];
+  const max = Math.ceil((P.redline + 400) / 1000) * 1000;
+  const cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 4;
+  const A0 = Math.PI * 0.75, A1 = Math.PI * 2.25;
+  const ang = r => A0 + (A1 - A0) * clamp(r / max, 0, 1);
+
+  c.fillStyle = css.panel;
+  c.beginPath(); c.arc(cx, cy, R, 0, Math.PI * 2); c.fill();
+
+  c.lineCap = 'butt'; c.lineWidth = R * 0.06;
+  c.strokeStyle = css.line;
+  c.beginPath(); c.arc(cx, cy, R * 0.88, A0, A1); c.stroke();
+  c.strokeStyle = css.redline;
+  c.beginPath(); c.arc(cx, cy, R * 0.88, ang(P.redline - 700), A1); c.stroke();
+
+  const cur = ang(D.rpm);
+  if (cur - A0 > 0.01) {
+    c.strokeStyle = css.accent; c.globalAlpha = 0.85; c.lineWidth = R * 0.06;
+    c.beginPath(); c.arc(cx, cy, R * 0.88, A0, Math.min(cur, ang(P.redline - 700))); c.stroke();
+    c.globalAlpha = 1;
+  }
+
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.font = '600 ' + Math.round(R * 0.095) + 'px system-ui, sans-serif';
+  for (let r = 0; r <= max; r += 250) {
+    const major = r % 1000 === 0, a = ang(r), ca = Math.cos(a), sa = Math.sin(a);
+    c.strokeStyle = r >= P.redline - 700 ? css.redline : css.muted;
+    c.lineWidth = major ? 2 : 1;
+    c.beginPath();
+    c.moveTo(cx + ca * R * 0.77, cy + sa * R * 0.77);
+    c.lineTo(cx + ca * R * (major ? 0.67 : 0.71), cy + sa * R * (major ? 0.67 : 0.71));
+    c.stroke();
+    if (major) { c.fillStyle = css.fg; c.fillText(String(r / 1000), cx + ca * R * 0.55, cy + sa * R * 0.55); }
+  }
+  c.fillStyle = css.muted; c.font = '500 ' + Math.round(R * 0.06) + 'px system-ui, sans-serif';
+  c.fillText('x1000 rpm', cx, cy - R * 0.28);
+
+  const na = ang(D.rpm), nx = Math.cos(na), ny = Math.sin(na);
+  c.lineCap = 'round';
+  c.strokeStyle = css.needle; c.globalAlpha = 0.2; c.lineWidth = 9;
+  c.beginPath(); c.moveTo(cx - nx * R * 0.1, cy - ny * R * 0.1); c.lineTo(cx + nx * R * 0.8, cy + ny * R * 0.8); c.stroke();
+  c.globalAlpha = 1; c.lineWidth = 3;
+  c.beginPath(); c.moveTo(cx - nx * R * 0.1, cy - ny * R * 0.1); c.lineTo(cx + nx * R * 0.8, cy + ny * R * 0.8); c.stroke();
+  c.fillStyle = css.panel2; c.strokeStyle = css.needle; c.lineWidth = 2;
+  c.beginPath(); c.arc(cx, cy, R * 0.06, 0, Math.PI * 2); c.fill(); c.stroke();
+}
+
+// ---- UI ----
+let lastUi = 0;
+function frame(t) {
+  draw();
+  if (t - lastUi > 90) { lastUi = t; ui(false); }
+  if (S.running) raf = requestAnimationFrame(frame);
+}
+
+function setState(id, s) { const el = $(id); if (el.dataset.s !== s) el.dataset.s = s; }
+
+function ui(force) {
+  const run = S.running;
+  const kmh = D.v * 3.6;
+  $('speed').textContent = Math.round(kmh);
+  $('gear').textContent = !run || kmh < 3 ? 'N' : String(D.g);
+  $('rpmVal').textContent = Math.round(run ? D.rpm : 0);
+  const ld = Math.round((run ? D.load : 0) * 100);
+  $('loadVal').textContent = ld + '%';
+  $('loadBar').style.width = ld + '%';
+  $('accVal').textContent = (run ? (S.accShown || 0) : 0).toFixed(1);
+
+  const btn = $('startBtn');
+  btn.textContent = run ? 'Stop engine' : 'Start engine';
+  btn.classList.toggle('on', run);
+
+  const now = performance.now();
+  setState('stMotion', S.sim || S.simOnly ? 'off' : run ? (now - S.lastMotion < 1000 && S.motionOk ? 'ok' : 'wait') : 'off');
+  setState('stGps', S.simOnly ? 'off' : run ? (G.ok && now - G.last < 3000 ? 'ok' : G.denied ? 'off' : 'wait') : 'off');
+  setState('stCal', S.simOnly ? 'off' : run ? (C.state === 'ready' ? 'ok' : 'wait') : 'off');
+  $('stGps').textContent = G.denied && run ? 'GPS off' : 'GPS';
+
+  let note;
+  if (S.msg) note = S.msg;
+  else if (!run) note = 'Park, mount the phone, connect Bluetooth audio, then tap Start.';
+  else if (S.sim) note = 'Test drive: move the throttle slider, hold Brake to slow down. Release both to coast.';
+  else if (!S.simOnly && !S.motionOk && now - S.startedAt > 2500) note = 'No motion data from this device. Use Test drive to try the sound.';
+  else if (C.state === 'gravity') note = 'Hold still for a second.';
+  else if (C.state === 'forward') note = 'Now pull away gently to set the forward direction.';
+  else if (C.state === 'ready') note = G.ok ? 'Ready. The engine follows your speed and throttle.' : (G.denied ? 'Ready without GPS. The engine follows acceleration only. Allow location for a steadier sound.' : 'Ready. Waiting for a GPS fix; until then the engine follows acceleration only.');
+  else note = '';
+  if ($('note').textContent !== note) $('note').textContent = note;
+}
+
+function buildChips() {
+  const box = $('chips');
+  Object.keys(PROFILES).forEach(k => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'chip'; b.textContent = PROFILES[k].name; b.dataset.k = k;
+    b.setAttribute('aria-pressed', String(k === S.engine));
+    b.addEventListener('click', () => {
+      S.engine = k; savePrefs();
+      box.querySelectorAll('.chip').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.k === k)));
+      $('engineName').textContent = PROFILES[k].name;
+      pushProfile(); draw();
+    });
+    box.appendChild(b);
+  });
+  $('engineName').textContent = PROFILES[S.engine].name;
+}
+
+$('startBtn').addEventListener('click', () => { S.running ? stop() : start(false); });
+
+$('vol').value = Math.round(S.vol * 100);
+$('volOut').textContent = Math.round(S.vol * 100) + '%';
+$('vol').addEventListener('input', e => {
+  S.vol = e.target.value / 100; $('volOut').textContent = e.target.value + '%'; savePrefs();
+  if (master && S.running) master.gain.setTargetAtTime(S.vol, ctx.currentTime, 0.05);
+});
+$('sens').value = Math.round(S.sens * 100);
+$('sensOut').textContent = Math.round(S.sens * 100) + '%';
+$('sens').addEventListener('input', e => { S.sens = e.target.value / 100; $('sensOut').textContent = e.target.value + '%'; savePrefs(); });
+
+$('recal').addEventListener('click', () => { if (S.running && !S.simOnly) { S.msg = ''; calBegin(C, performance.now()); S.af = 0; } });
+$('flip').addEventListener('click', () => { C.flip *= -1; });
+
+$('simBtn').addEventListener('click', () => {
+  S.sim = !S.sim;
+  $('simBtn').setAttribute('aria-pressed', String(S.sim));
+  $('test').classList.toggle('show', S.sim);
+  if (S.sim && !S.running) start(true);
+  else if (!S.sim && S.running && S.simOnly) stop();
+  else if (S.sim) { D.v = 0; D.g = 1; }
+});
+$('thr').addEventListener('input', e => { S.thr = e.target.value / 100; $('thrOut').textContent = e.target.value + '%'; });
+const brake = $('brake');
+['pointerdown'].forEach(ev => brake.addEventListener(ev, e => { e.preventDefault(); S.brake = true; }));
+['pointerup', 'pointercancel', 'pointerleave'].forEach(ev => brake.addEventListener(ev, () => { S.brake = false; }));
+
+window.addEventListener('resize', () => { resizeCanvas(); draw(); });
+readCss(); buildChips(); resizeCanvas(); draw(); ui(true);
+})();
+</script>
+</body>
+</html>
