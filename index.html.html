@@ -93,7 +93,7 @@ details ol{margin:10px 0 0;padding-left:20px;display:flex;flex-direction:column;
 
   <section class="dial" aria-label="Tachometer">
     <canvas id="tach"></canvas>
-    <div class="readout"><div class="speed" id="speed">0</div><div class="unit">km/h</div></div>
+    <div class="readout"><div class="speed" id="speed">0</div><div class="unit" id="unit">km/h</div></div>
     <div class="gear" id="gear">N</div>
   </section>
 
@@ -140,9 +140,10 @@ details ol{margin:10px 0 0;padding-left:20px;display:flex;flex-direction:column;
   <details class="card">
     <summary>Using it in the car</summary>
     <ol>
-      <li>Mount the phone so it cannot slide, with the car parked.</li>
+      <li>Mount the phone so it cannot slide. Do not handle it while driving; set it up before you set off, or let a passenger do it.</li>
       <li>Connect the phone to the car by Bluetooth and set the car to that input.</li>
-      <li>Tap Start, keep still for a second, then pull away gently. That sets which way is forward.</li>
+      <li>Tap Start. The engine follows GPS speed right away. It learns which way is forward from your first gentle acceleration or braking, whether you start parked or already moving.</li>
+      <li>The line under the speed says whether it comes from GPS or is only estimated. If it says estimated, allow location for this site in iPhone Settings, Privacy &amp; Security, Location Services, Safari Websites.</li>
       <li>Keep this page open on screen. Browsers stop the sensors and the sound when the screen locks or you switch apps.</li>
       <li>Bluetooth delays the sound by a fraction of a second. That is normal.</li>
       <li>If the engine feels too lazy or too eager, change throttle sensitivity. If it revs when you brake, tap Flip direction.</li>
@@ -271,8 +272,9 @@ function stepDrive(D, P, inp, dt) {
   if (D.v < 0) D.v = 0;
   const kmh = D.v * 3.6;
 
+  const afL = inp.afLoad != null ? inp.afLoad : af;
   const load = inp.throttle != null ? inp.throttle
-    : clamp(0.10 + 0.18 * clamp(kmh / 150, 0, 1) + af * inp.sens / 3.2, 0, 1);
+    : clamp(0.10 + 0.18 * clamp(kmh / 150, 0, 1) + afL * inp.sens / 3.2, 0, 1);
 
   const K = g => 0.92 * P.redline / VTOP[g - 1];
   D.shiftT = Math.max(0, D.shiftT - dt);
@@ -314,14 +316,20 @@ const vlen = a => Math.hypot(a[0], a[1], a[2]);
 const vnorm = a => { const l = vlen(a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 
 function newCal() {
-  return { state: 'idle', g0: null, fwd: null, sum: [0, 0, 0], n: 0, t0: 0, fsum: [0, 0, 0], fT: 0, bias: 0, flip: 1 };
+  return { state: 'idle', g0: null, fwd: null, sum: [0, 0, 0], n: 0, t0: 0, fsum: [0, 0, 0], fT: 0,
+           gsum: [0, 0, 0], evid: 0, hSum: [0, 0, 0], hN: 0, bias: 0, flip: 1 };
 }
 function calBegin(c, tMs) {
   c.state = 'gravity'; c.g0 = null; c.fwd = null; c.sum = [0, 0, 0]; c.n = 0; c.t0 = tMs;
-  c.fsum = [0, 0, 0]; c.fT = 0; c.bias = 0;
+  c.fsum = [0, 0, 0]; c.fT = 0; c.gsum = [0, 0, 0]; c.evid = 0; c.hSum = [0, 0, 0]; c.hN = 0; c.bias = 0;
 }
-// r: accelerationIncludingGravity [x,y,z]; returns forward acceleration in m/s2 (0 until calibrated)
-function calStep(c, r, dt, tMs, steady) {
+function horiz(c, lin) {
+  const gn = vnorm(c.g0), d = vdot(lin, gn);
+  return [lin[0] - gn[0] * d, lin[1] - gn[1] * d, lin[2] - gn[2] * d];
+}
+// r: accelerationIncludingGravity [x,y,z]; returns forward acceleration in m/s2 (0 until calibrated).
+// info: { steady (GPS says speed is constant), gpsFresh, speed (GPS m/s) }
+function calStep(c, r, dt, tMs, info) {
   if (c.state === 'gravity') {
     c.sum[0] += r[0]; c.sum[1] += r[1]; c.sum[2] += r[2]; c.n++;
     if (tMs - c.t0 > 1200 && c.n > 20) {
@@ -331,30 +339,52 @@ function calStep(c, r, dt, tMs, steady) {
     return 0;
   }
   if (!c.g0) return 0;
-  const lin = [r[0] - c.g0[0], r[1] - c.g0[1], r[2] - c.g0[2]];
   if (c.state === 'forward') {
-    const gn = vnorm(c.g0), d = vdot(lin, gn);
-    const h = [lin[0] - gn[0] * d, lin[1] - gn[1] * d, lin[2] - gn[2] * d];
-    if (vlen(h) > 1.0) {
-      c.fsum[0] += h[0]; c.fsum[1] += h[1]; c.fsum[2] += h[2]; c.fT += dt;
-      if (c.fT > 0.35) { c.fwd = vnorm(c.fsum); c.state = 'ready'; }
-    } else if (c.fT > 0) {
-      c.fT = Math.max(0, c.fT - dt * 2);
-      if (c.fT === 0) c.fsum = [0, 0, 0];
+    // while driving at constant speed the average reading is gravity, so keep refining it
+    if (info.steady) { const k = Math.min(1, dt / 5); for (let i = 0; i < 3; i++) c.g0[i] += (r[i] - c.g0[i]) * k; }
+    const h = horiz(c, [r[0] - c.g0[0], r[1] - c.g0[1], r[2] - c.g0[2]]);
+    c.hSum[0] += h[0]; c.hSum[1] += h[1]; c.hSum[2] += h[2]; c.hN++;
+    // a push from standstill (or without GPS) is forward by definition; while moving, GPS decides (calGps)
+    if (!info.gpsFresh || info.speed < 1.0) {
+      if (vlen(h) > 1.0) {
+        c.fsum[0] += h[0]; c.fsum[1] += h[1]; c.fsum[2] += h[2]; c.fT += dt;
+        if (c.fT > 0.35) { c.fwd = vnorm(c.fsum); c.state = 'ready'; }
+      } else if (c.fT > 0) {
+        c.fT = Math.max(0, c.fT - dt * 2);
+        if (c.fT === 0) c.fsum = [0, 0, 0];
+      }
     }
     return 0;
   }
   if (c.state !== 'ready') return 0;
+  const lin = [r[0] - c.g0[0], r[1] - c.g0[1], r[2] - c.g0[2]];
   const raw = vdot(lin, c.fwd) * c.flip;
   const af = clamp(raw - c.bias, -9, 9);
-  if (steady && Math.abs(af) < 0.6) c.bias += (raw - c.bias) * Math.min(1, dt / 15);
+  if (info.steady && Math.abs(af) < 0.6) c.bias += (raw - c.bias) * Math.min(1, dt / 15);
   return af;
+}
+// Called on every GPS fix with the acceleration GPS saw since the previous fix. Lets the forward direction be
+// learned from ordinary acceleration and braking while the car is already moving.
+function calGps(c, ga, speed) {
+  if (c.state !== 'forward') return;
+  const n = c.hN;
+  if (n > 5) {
+    const m = [c.hSum[0] / n, c.hSum[1] / n, c.hSum[2] / n];
+    const mag = vlen(m), a = Math.abs(ga);
+    if (a > 0.35 && speed > 2 && mag > 0.5 * a && mag < 2 * a + 0.3) {
+      const s = ga > 0 ? 1 : -1;
+      c.gsum[0] += m[0] * s; c.gsum[1] += m[1] * s; c.gsum[2] += m[2] * s;
+      c.evid += Math.min(a, 2);
+      if (c.evid >= 1.5) { c.fwd = vnorm(c.gsum); c.state = 'ready'; }
+    }
+  }
+  c.hSum = [0, 0, 0]; c.hN = 0;
 }
 // </core>
 
 const $ = id => document.getElementById(id);
 const S = { running: false, simOnly: false, engine: 'v8', vol: 1.2, sens: 1, sim: false, thr: 0, brake: false,
-            af: 0, motionOk: false, lastMotion: 0, tm: 0, steady: false, watch: null };
+            af: 0, gpsA: 0, motionOk: false, lastMotion: 0, tm: 0, steady: false, watch: null };
 const D = newDrive();
 const C = newCal();
 const G = { ok: false, v: 0, last: 0, denied: false };
@@ -409,6 +439,7 @@ async function start(simOnly) {
     master.gain.setTargetAtTime(S.vol, ctx.currentTime, 0.15);
     Object.assign(D, newDrive());
     S.running = true; S.simOnly = !!simOnly; S.motionOk = false; S.startedAt = performance.now();
+    S.gpsA = 0; S.steady = false; G.ok = false; G.last = 0;
     if (!simOnly) startSensors(motionAllowed);
     lastT = performance.now();
     timer = setInterval(tick, 20);
@@ -465,7 +496,8 @@ function onMotion(e) {
   let dt = (t - (S.tm || t)) / 1000; S.tm = t;
   dt = clamp(dt, 0.001, 0.1);
   S.motionOk = true; S.lastMotion = t;
-  const af = calStep(C, [a.x, a.y, a.z], dt, t, S.steady);
+  const fresh = G.ok && (t - G.last) < 3000;
+  const af = calStep(C, [a.x, a.y, a.z], dt, t, { steady: S.steady && fresh, gpsFresh: fresh, speed: G.v });
   S.af += (af - S.af) * (1 - Math.exp(-dt / 0.12));
 }
 
@@ -474,8 +506,13 @@ function onGps(p) {
   if (sp == null || !isFinite(sp) || sp < 0) return;
   const t = performance.now();
   if (G.ok && G.last) {
-    const ga = (sp - G.v) / Math.max(0.3, (t - G.last) / 1000);
-    S.steady = Math.abs(ga) < 0.2;
+    const gap = (t - G.last) / 1000;
+    if (gap > 0.3 && gap < 2.5) {
+      const ga = (sp - G.v) / gap;
+      S.steady = Math.abs(ga) < 0.2;
+      S.gpsA += (ga - S.gpsA) * 0.6;
+      calGps(C, ga, sp);
+    } else { S.steady = false; }
   }
   G.ok = true; G.v = sp; G.last = t;
 }
@@ -493,8 +530,11 @@ function tick() {
     const a = thr * 4.5 * (1 - v / 75) - 0.0006 * v * v - (v > 0.3 ? 0.15 : 0) - (S.brake ? 7 : 0);
     inp = { mode: 'sim', af: a, throttle: S.brake ? 0.03 : 0.08 + 0.92 * thr, sens: S.sens };
   } else {
-    inp = { mode: G.ok ? 'gps' : 'accel', af: C.state === 'ready' ? S.af : 0, gpsV: G.v,
-            gpsFresh: G.ok && (t - G.last) < 3000, throttle: null, sens: S.sens };
+    const fresh = G.ok && (t - G.last) < 3000;
+    const ready = C.state === 'ready';
+    inp = { mode: G.ok ? 'gps' : 'accel', af: ready ? S.af : 0, gpsV: G.v,
+            gpsFresh: fresh, throttle: null, sens: S.sens,
+            afLoad: !ready && fresh ? S.gpsA : null }; // before calibration, GPS acceleration drives the throttle feel
   }
   const o = stepDrive(D, P, inp, dt);
   const now = ctx.currentTime;
@@ -596,14 +636,17 @@ function ui(force) {
   setState('stGps', S.simOnly ? 'off' : run ? (G.ok && now - G.last < 3000 ? 'ok' : G.denied ? 'off' : 'wait') : 'off');
   setState('stCal', S.simOnly ? 'off' : run ? (C.state === 'ready' ? 'ok' : 'wait') : 'off');
   $('stGps').textContent = G.denied && run ? 'GPS off' : 'GPS';
+  const gpsLive = run && !S.simOnly && !S.sim && G.ok && now - G.last < 3000;
+  const unit = !run ? 'km/h' : S.sim ? 'km/h · test' : gpsLive ? 'km/h · GPS' : 'km/h · estimated';
+  if ($('unit').textContent !== unit) $('unit').textContent = unit;
 
   let note;
   if (S.msg) note = S.msg;
   else if (!run) note = 'Park, mount the phone, connect Bluetooth audio, then tap Start.';
   else if (S.sim) note = 'Test drive: move the throttle slider, hold Brake to slow down. Release both to coast.';
   else if (!S.simOnly && !S.motionOk && now - S.startedAt > 2500) note = 'No motion data from this device. Use Test drive to try the sound.';
-  else if (C.state === 'gravity') note = 'Hold still for a second.';
-  else if (C.state === 'forward') note = 'Now pull away gently to set the forward direction.';
+  else if (C.state === 'gravity') note = 'Keep the phone still in its mount for a second.';
+  else if (C.state === 'forward') note = G.ok && G.v >= 1 ? 'Drive normally. It locks on during your next gentle acceleration or braking.' : 'Now pull away gently to set the forward direction.';
   else if (C.state === 'ready') note = G.ok ? 'Ready. The engine follows your speed and throttle.' : (G.denied ? 'Ready without GPS. The engine follows acceleration only. Allow location for a steadier sound.' : 'Ready. Waiting for a GPS fix; until then the engine follows acceleration only.');
   else note = '';
   if ($('note').textContent !== note) $('note').textContent = note;
