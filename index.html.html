@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#0b0e13">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<title>Phantom Engine</title>
+<title>Phantom Engine Deep</title>
 <style>
 /* Layout: one column instrument cluster. Tach on top with the gear sitting in the gap at the bottom of the dial,
    status and start button next, then settings. Single dark theme on purpose: it is used in a car, often at night. */
@@ -87,7 +87,7 @@ details ol{margin:10px 0 0;padding-left:20px;display:flex;flex-direction:column;
 <body>
 <main class="app">
   <header>
-    <h1>Phantom Engine</h1>
+    <h1>Phantom Engine <small style="font-weight:400;opacity:.6">deep</small></h1>
     <span class="sub" id="engineName">BMW M4</span>
   </header>
 
@@ -122,6 +122,10 @@ details ol{margin:10px 0 0;padding-left:20px;display:flex;flex-direction:column;
       <input id="vol" type="range" min="0" max="200" step="1">
     </div>
     <div class="row">
+      <label for="bub">Burble <output id="bubOut"></output></label>
+      <input id="bub" type="range" min="0" max="200" step="5">
+      <label for="depth">Depth <output id="depthOut"></output></label>
+      <input id="depth" type="range" min="0" max="150" step="5">
       <label for="bass">Cabin bass <output id="bassOut"></output></label>
       <input id="bass" type="range" min="0" max="150" step="5">
     </div>
@@ -171,14 +175,14 @@ class EngineProcessor extends AudioWorkletProcessor {
   }
   constructor() {
     super();
-    this.cfg = { cyl: 4, rough: 0.15, bright: 0.55, drive: 1, pipe: 1, noise: 0.5, pops: 0.3, redline: 7000, turbo: 0, flap: 0.5, bass: 0, alt: 0 };
+    this.cfg = { cyl: 4, rough: 0.15, bright: 0.55, drive: 1, pipe: 1, noise: 0.5, pops: 0.3, redline: 7000, turbo: 0, flap: 0.5, bass: 0, alt: 0, bub: 0.3 };
     this.rs1 = 0; this.rs2 = 0;
     this.cyc = 0; this.lastK = -1; this.pulse = 0; this.pop = 0;
     this.boost = 0; this.wh = 0; this.bov = 0; this.bz = 0; this.bovArmed = true;
     this.rpmS = 900; this.loadS = 0.1;
     this.seed = 1337;
     this.cylAmp = new Float32Array(16).fill(1);
-    this.lpOut = 0; this.dcX = 0; this.dcY = 0; this.nz1 = 0; this.nz2 = 0;
+    this.bm = 0; this.evm = 0; this.lpOut = 0; this.dcX = 0; this.dcY = 0; this.nz1 = 0; this.nz2 = 0;
     this.res = [];
     this.port.onmessage = (e) => { Object.assign(this.cfg, e.data); this.setup(); };
     this.setup();
@@ -204,7 +208,8 @@ class EngineProcessor extends AudioWorkletProcessor {
     const c = this.cfg, sr = sampleRate, cyl = Math.max(1, c.cyl | 0);
     const pDecay = Math.exp(-1 / (sr * 0.0016));
     const res = this.res, nr = res.length;
-    if (loadT < 0.06 && this.rpmS > 3000 && this.rnd() < 0.006 * c.pops) this.pop = 1;
+    if (loadT < 0.06 && this.rpmS > 3000 && this.rnd() < 0.006 * c.pops * (1 + 1.5 * c.bub)) this.pop = 0.5 + 0.5 * this.rnd();
+    else if (loadT < 0.3 && this.rpmS > 2000 && this.rnd() < 0.0012 * c.pops * c.bub) this.pop = 0.35 + 0.4 * this.rnd();
     if (c.turbo > 0 && this.bovArmed && this.boost > 0.4 && loadT < 0.12) { this.bov = 0.5 + 0.5 * this.boost; this.bovArmed = false; }
     if (loadT > 0.5) this.bovArmed = true;
     const rr = Math.min(1, this.rpmS / c.redline);
@@ -218,14 +223,18 @@ class EngineProcessor extends AudioWorkletProcessor {
       this.rpmS += (rpmT - this.rpmS) * 0.006;
       this.loadS += (loadT - this.loadS) * 0.002;
       const rpm = this.rpmS, load = this.loadS;
-      this.cyc += rpm / 120 / sr;
+      this.bm += (this.rnd() * 2 - 1 - this.bm) * 0.004;
+      const bn = this.bm * 38;
+      this.cyc += rpm / 120 / sr * (1 + c.bub * 0.004 * bn);
       if (this.cyc >= 1) this.cyc -= 1;
       const k = Math.floor(this.cyc * cyl);
       if (k !== this.lastK) {
         this.lastK = k;
-        this.pulse = (0.30 + 0.70 * load) * this.cylAmp[k] * (1 + (this.rnd() - 0.5) * c.rough * 0.8) * (1 + c.alt * ((k & 1) ? 1 : -1));
+        this.evm = 0.5 * this.evm + 0.5 * (this.rnd() * 2 - 1);
+        this.pulse = (0.30 + 0.70 * load) * this.cylAmp[k] * (1 + (this.rnd() - 0.5) * c.rough * 0.8) * (1 + c.alt * ((k & 1) ? 1 : -1)) * (1 + c.bub * 0.5 * this.evm);
+        if (load < 0.6 && this.rnd() < 0.05 * c.bub) this.pulse *= 0.3;
       }
-      let x = this.pulse;
+      let x = this.pulse * (1 + c.bub * 0.3 * bn) + this.pulse * c.bub * 0.5 * (this.rnd() * 2 - 1);
       this.pulse *= pDecay;
       if (this.pop > 0.001) { x += this.pop * (this.rnd() * 2 - 1) * 0.8; this.pop *= 0.9985; } else { this.pop = 0; }
       let y = 0;
@@ -294,9 +303,9 @@ const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 // Gear ratios x 3.154 final drive x wheel revs per km/h for the 285/30 R20 rear tire (2.133 m rolling circumference).
 const M4_GEARS = [5.000, 3.200, 2.143, 1.720, 1.314, 1.000, 0.822, 0.640].map(g => g * 3.154 * 1000 / 60 / 2.133);
 const PROFILES = {
-  m4:  { name: 'BMW M4',   cyl: 6,  idle: 700, redline: 7200, rough: 0.03, bright: 1.2, drive: 0.2, pipe: 0.78, noise: 0.61, pops: 1.0, turbo: 0.8, wob: 4, bass: 1.5, alt: 0.256,
+  m4:  { name: 'BMW M4',   cyl: 6,  idle: 700, redline: 7200, rough: 0.03, bright: 1.2, drive: 0.2, pipe: 0.78, noise: 0.61, pops: 1.0, turbo: 0.8, wob: 4, bass: 1.5, alt: 0.256, bub: 0.9,
          gearK: M4_GEARS, upTop: 6900, upMin: 2300, downRpm: 1250, shiftUp: 0.15, shiftDown: 0.10, simA: 7.8, simV: 95 },
-  v12: { name: 'Ferrari V12', cyl: 12, idle: 1000, redline: 9000, rough: 0.04, bright: 1.0, drive: 0.2, pipe: 0.73, noise: 2.5, pops: 0.8, wob: 3, bass: 1.5, alt: 0.263,
+  v12: { name: 'Ferrari V12', cyl: 12, idle: 1000, redline: 9000, rough: 0.04, bright: 1.0, drive: 0.2, pipe: 0.73, noise: 2.5, pops: 0.8, wob: 3, bass: 1.5, alt: 0.263, bub: 0.55,
          vtop: [62, 98, 140, 185, 232, 285, 345], upTop: 8600, upMin: 3500, downRpm: 2600, shiftUp: 0.10, shiftDown: 0.08, simA: 9.5, simV: 100 },
   i4:  { name: 'Inline-4', cyl: 4,  idle: 850, redline: 7200, rough: 0.10, bright: 0.55, drive: 0.9, pipe: 1.15, noise: 0.5,  pops: 0.4, wob: 8 },
   i6:  { name: 'Inline-6', cyl: 6,  idle: 800, redline: 7000, rough: 0.05, bright: 0.60, drive: 0.8, pipe: 1.0,  noise: 0.45, pops: 0.2, wob: 5 },
@@ -450,22 +459,24 @@ function calGps(c, ga, speed) {
 // </core>
 
 const $ = id => document.getElementById(id);
-const S = { running: false, simOnly: false, engine: 'm4', dm: 'sport', vol: 1.2, sens: 1, lead: 0.22, bass: 1, sim: false, thr: 0, brake: false,
+const S = { running: false, simOnly: false, engine: 'm4', dm: 'sport', vol: 1.2, sens: 1, lead: 0.22, bass: 1, bub: 1, depth: 0.8, sim: false, thr: 0, brake: false,
             af: 0, gpsA: 0, motionOk: false, lastMotion: 0, tm: 0, steady: false, watch: null };
 const D = newDrive();
 const C = newCal();
 const G = { ok: false, v: 0, last: 0, denied: false };
 
 try {
-  const p = JSON.parse(localStorage.getItem('phantom-engine-2') || '{}');
+  const p = JSON.parse(localStorage.getItem('phantom-engine-deep') || '{}');
   if (PROFILES[p.engine]) S.engine = p.engine;
   if (DRIVE_MODES[p.dm]) S.dm = p.dm;
   if (p.vol >= 0 && p.vol <= 2) S.vol = p.vol;
   if (p.sens >= 0.4 && p.sens <= 2.5) S.sens = p.sens;
   if (p.lead >= 0 && p.lead <= 0.6) S.lead = p.lead;
   if (p.bass >= 0 && p.bass <= 1.5) S.bass = p.bass;
+  if (p.depth >= 0 && p.depth <= 1.5) S.depth = p.depth;
+  if (p.bub >= 0 && p.bub <= 2) S.bub = p.bub;
 } catch (e) {}
-const savePrefs = () => { try { localStorage.setItem('phantom-engine-2', JSON.stringify({ engine: S.engine, dm: S.dm, vol: S.vol, sens: S.sens, lead: S.lead, bass: S.bass })); } catch (e) {} };
+const savePrefs = () => { try { localStorage.setItem('phantom-engine-deep', JSON.stringify({ engine: S.engine, dm: S.dm, vol: S.vol, sens: S.sens, lead: S.lead, bass: S.bass, bub: S.bub, depth: S.depth })); } catch (e) {} };
 
 // ---- audio ----
 let ctx = null, node = null, master = null, rpmParam = null, loadParam = null, wake = null, timer = null, raf = 0, lastT = 0;
@@ -475,7 +486,8 @@ function pushProfile() {
   if (!node) return;
   const P = PROFILES[S.engine];
   const M = DRIVE_MODES[S.dm];
-  node.port.postMessage({ cyl: P.cyl, rough: P.rough, bright: P.bright, drive: P.drive, pipe: P.pipe, noise: P.noise, pops: P.pops * M.pops, redline: P.redline, turbo: P.turbo || 0, flap: M.flap, bass: (P.bass || 0) * S.bass, alt: P.alt || 0 });
+  const dp = S.depth;
+  node.port.postMessage({ cyl: P.cyl, rough: P.rough, bright: P.bright * (1 - 0.55 * dp), drive: P.drive * (1 + 0.25 * dp), pipe: P.pipe * (1 - 0.38 * dp), noise: P.noise * (1 - 0.3 * dp), pops: P.pops * M.pops, redline: P.redline, turbo: P.turbo || 0, flap: M.flap, bass: Math.min(2.6, ((P.bass || 0) + 0.5 * dp) * S.bass * (1 + 0.5 * dp)), alt: P.alt || 0, bub: (P.bub != null ? P.bub : 0.3) * S.bub });
 }
 
 async function start(simOnly) {
@@ -780,6 +792,12 @@ $('sens').value = Math.round(S.sens * 100);
 $('sensOut').textContent = Math.round(S.sens * 100) + '%';
 $('sens').addEventListener('input', e => { S.sens = e.target.value / 100; $('sensOut').textContent = e.target.value + '%'; savePrefs(); });
 
+$('bub').value = Math.round(S.bub * 100);
+$('bubOut').textContent = Math.round(S.bub * 100) + '%';
+$('bub').addEventListener('input', e => { S.bub = e.target.value / 100; $('bubOut').textContent = e.target.value + '%'; savePrefs(); pushProfile(); });
+$('depth').value = Math.round(S.depth * 100);
+$('depthOut').textContent = Math.round(S.depth * 100) + '%';
+$('depth').addEventListener('input', e => { S.depth = e.target.value / 100; $('depthOut').textContent = e.target.value + '%'; savePrefs(); pushProfile(); });
 $('bass').value = Math.round(S.bass * 100);
 $('bassOut').textContent = Math.round(S.bass * 100) + '%';
 $('bass').addEventListener('input', e => { S.bass = e.target.value / 100; $('bassOut').textContent = e.target.value + '%'; savePrefs(); pushProfile(); });
