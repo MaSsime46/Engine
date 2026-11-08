@@ -88,7 +88,7 @@ details ol{margin:10px 0 0;padding-left:20px;display:flex;flex-direction:column;
 <main class="app">
   <header>
     <h1>Phantom Engine</h1>
-    <span class="sub" id="engineName">V8</span>
+    <span class="sub" id="engineName">BMW M4</span>
   </header>
 
   <section class="dial" aria-label="Tachometer">
@@ -123,6 +123,10 @@ details ol{margin:10px 0 0;padding-left:20px;display:flex;flex-direction:column;
       <label for="sens">Throttle sensitivity <output id="sensOut"></output></label>
       <input id="sens" type="range" min="40" max="250" step="5">
     </div>
+    <div class="row">
+      <label for="lead">Delay compensation <output id="leadOut"></output></label>
+      <input id="lead" type="range" min="0" max="600" step="10">
+    </div>
     <div class="btns">
       <button class="btn" id="recal" type="button">Recalibrate</button>
       <button class="btn" id="flip" type="button">Flip direction</button>
@@ -145,7 +149,7 @@ details ol{margin:10px 0 0;padding-left:20px;display:flex;flex-direction:column;
       <li>Tap Start. The engine follows GPS speed right away. It learns which way is forward from your first gentle acceleration or braking, whether you start parked or already moving.</li>
       <li>The line under the speed says whether it comes from GPS or is only estimated. If it says estimated, allow location for this site in iPhone Settings, Privacy &amp; Security, Location Services, Safari Websites.</li>
       <li>Keep this page open on screen. Browsers stop the sensors and the sound when the screen locks or you switch apps.</li>
-      <li>Bluetooth delays the sound by a fraction of a second. That is normal.</li>
+      <li>Bluetooth delays the sound by roughly 0.15 to 0.3 seconds. Delay compensation makes the engine rev ahead to cover that. Raise it if the sound still arrives late, lower it if it feels like it jumps ahead. A USB or AUX cable removes most of the delay.</li>
       <li>If the engine feels too lazy or too eager, change throttle sensitivity. If it revs when you brake, tap Flip direction.</li>
     </ol>
   </details>
@@ -161,8 +165,9 @@ class EngineProcessor extends AudioWorkletProcessor {
   }
   constructor() {
     super();
-    this.cfg = { cyl: 4, rough: 0.15, bright: 0.55, drive: 1, pipe: 1, noise: 0.5, pops: 0.3, redline: 7000 };
+    this.cfg = { cyl: 4, rough: 0.15, bright: 0.55, drive: 1, pipe: 1, noise: 0.5, pops: 0.3, redline: 7000, turbo: 0 };
     this.cyc = 0; this.lastK = -1; this.pulse = 0; this.pop = 0;
+    this.boost = 0; this.wh = 0; this.bov = 0; this.bz = 0; this.bovArmed = true;
     this.rpmS = 900; this.loadS = 0.1;
     this.seed = 1337;
     this.cylAmp = new Float32Array(16).fill(1);
@@ -193,12 +198,14 @@ class EngineProcessor extends AudioWorkletProcessor {
     const pDecay = Math.exp(-1 / (sr * 0.0016));
     const res = this.res, nr = res.length;
     if (loadT < 0.06 && this.rpmS > 3000 && this.rnd() < 0.006 * c.pops) this.pop = 1;
+    if (c.turbo > 0 && this.bovArmed && this.boost > 0.4 && loadT < 0.12) { this.bov = 0.5 + 0.5 * this.boost; this.bovArmed = false; }
+    if (loadT > 0.5) this.bovArmed = true;
     const rr = Math.min(1, this.rpmS / c.redline);
     const fc = 500 + 5000 * c.bright * (0.25 + 0.75 * this.loadS) * (0.5 + 0.5 * rr);
     const lpA = 1 - Math.exp(-2 * Math.PI * fc / sr);
     for (let i = 0; i < n; i++) {
-      this.rpmS += (rpmT - this.rpmS) * 0.0025;
-      this.loadS += (loadT - this.loadS) * 0.0008;
+      this.rpmS += (rpmT - this.rpmS) * 0.006;
+      this.loadS += (loadT - this.loadS) * 0.002;
       const rpm = this.rpmS, load = this.loadS;
       this.cyc += rpm / 120 / sr;
       if (this.cyc >= 1) this.cyc -= 1;
@@ -231,7 +238,20 @@ class EngineProcessor extends AudioWorkletProcessor {
       this.lpOut += lpA * (s - this.lpOut);
       const dc = this.lpOut - this.dcX + 0.997 * this.dcY;
       this.dcX = this.lpOut; this.dcY = dc;
-      let o = dc * 0.32;
+      let tb = 0;
+      if (c.turbo > 0) {
+        this.boost += (load * load * Math.min(1, rpm / 3500) - this.boost) * 0.00006;
+        const wf = 1500 + 3500 * this.boost;
+        this.wh += 6.283185307 * wf / sr; if (this.wh > 6.283185307) this.wh -= 6.283185307;
+        tb = Math.sin(this.wh) * c.turbo * 0.03 * this.boost * this.boost;
+        if (this.bov > 0.001) {
+          const wn = this.rnd() * 2 - 1;
+          this.bz += 0.35 * (wn - this.bz);
+          tb += (wn - this.bz) * this.bov * c.turbo * 0.18;
+          this.bov *= 0.99994;
+        } else { this.bov = 0; }
+      }
+      let o = dc * 0.32 + tb;
       if (!(o === o) || o > 4 || o < -4) { o = 0; this.dcY = 0; this.lpOut = 0; for (let j = 0; j < nr; j++) { res[j].s1 = 0; res[j].s2 = 0; } }
       ch0[i] = o;
     }
@@ -249,7 +269,12 @@ registerProcessor('engine', EngineProcessor);
 // <core>
 const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
 
+// BMW M4 (G82, S58B30T0 3.0 twin-turbo inline-6, 8-speed M Steptronic). Redline 7,200 rpm, peak power at 6,250 rpm.
+// Gear ratios x 3.154 final drive x wheel revs per km/h for the 285/30 R20 rear tire (2.133 m rolling circumference).
+const M4_GEARS = [5.000, 3.200, 2.143, 1.720, 1.314, 1.000, 0.822, 0.640].map(g => g * 3.154 * 1000 / 60 / 2.133);
 const PROFILES = {
+  m4:  { name: 'BMW M4',   cyl: 6,  idle: 700, redline: 7200, rough: 0.03, bright: 0.78, drive: 1.35, pipe: 0.95, noise: 0.55, pops: 1.0, turbo: 0.8, wob: 4,
+         gearK: M4_GEARS, upTop: 6900, upMin: 2300, downRpm: 1250, shiftUp: 0.15, shiftDown: 0.10, simA: 7.8, simV: 95 },
   i4:  { name: 'Inline-4', cyl: 4,  idle: 850, redline: 7200, rough: 0.10, bright: 0.55, drive: 0.9, pipe: 1.15, noise: 0.5,  pops: 0.4, wob: 8 },
   i6:  { name: 'Inline-6', cyl: 6,  idle: 800, redline: 7000, rough: 0.05, bright: 0.60, drive: 0.8, pipe: 1.0,  noise: 0.45, pops: 0.2, wob: 5 },
   v6:  { name: 'V6',       cyl: 6,  idle: 850, redline: 7000, rough: 0.12, bright: 0.55, drive: 1.0, pipe: 1.1,  noise: 0.5,  pops: 0.3, wob: 7 },
@@ -267,7 +292,7 @@ function stepDrive(D, P, inp, dt) {
   D.t += dt;
   const af = inp.af;
   D.v += af * dt;
-  if (inp.mode === 'gps' && inp.gpsFresh) D.v += (inp.gpsV - D.v) * (1 - Math.exp(-dt / 1.0));
+  if (inp.mode === 'gps' && inp.gpsFresh) D.v += (inp.gpsV - D.v) * (1 - Math.exp(-dt / 2.0));
   else if (inp.mode !== 'sim') D.v *= Math.exp(-dt / (inp.mode === 'gps' ? 15 : 12));
   if (D.v < 0) D.v = 0;
   const kmh = D.v * 3.6;
@@ -276,14 +301,18 @@ function stepDrive(D, P, inp, dt) {
   const load = inp.throttle != null ? inp.throttle
     : clamp(0.10 + 0.18 * clamp(kmh / 150, 0, 1) + afL * inp.sens / 3.2, 0, 1);
 
-  const K = g => 0.92 * P.redline / VTOP[g - 1];
+  const ng = P.gearK ? P.gearK.length : 6;
+  const K = g => P.gearK ? P.gearK[g - 1] : 0.92 * P.redline / VTOP[g - 1];
+  const su = P.shiftUp || 0.25, sd = P.shiftDown || 0.15;
   D.shiftT = Math.max(0, D.shiftT - dt);
   if (D.shiftT === 0) {
     const wheel = kmh * K(D.g);
-    const downRpm = P.idle + 750;
-    const upRpm = Math.max(2800, P.idle + (P.redline - 700 - P.idle) * (0.2 + 0.8 * Math.pow(load, 1.3)));
-    if (D.g < 6 && wheel > upRpm && kmh * K(D.g + 1) > downRpm + 300) { D.g++; D.shiftT = 0.25; D.shiftDir = 1; }
-    else if (D.g > 1 && wheel < downRpm && kmh * K(D.g - 1) < P.redline - 800) { D.g--; D.shiftT = 0.15; D.shiftDir = -1; }
+    const downRpm = P.downRpm || P.idle + 750;
+    const upTop = P.upTop || P.redline - 700;
+    const w = P.gearK ? 0.1 + 0.9 * Math.pow(load, 1.5) : 0.2 + 0.8 * Math.pow(load, 1.3);
+    const upRpm = Math.max(P.upMin || 2800, P.idle + (upTop - P.idle) * w);
+    if (D.g < ng && wheel > upRpm && kmh * K(D.g + 1) > downRpm + 300) { D.g++; D.shiftT = su; D.shiftDir = 1; }
+    else if (D.g > 1 && wheel < downRpm && kmh * K(D.g - 1) < P.redline - 800) { D.g--; D.shiftT = sd; D.shiftDir = -1; }
   }
 
   let tgt = Math.max(P.idle, kmh * K(D.g));
@@ -298,12 +327,12 @@ function stepDrive(D, P, inp, dt) {
     cut = Math.sin(D.t * 38) > 0;
     tgt = P.redline - (cut ? 350 : 0);
   }
-  const tau = tgt > D.rpm ? 0.07 : 0.14;
+  const tau = tgt > D.rpm ? 0.045 : 0.10;
   D.rpm += (tgt - D.rpm) * (1 - Math.exp(-dt / tau));
   D.rpm = clamp(D.rpm, 0, P.redline);
 
   let aLoad = load;
-  if (D.shiftT > 0.1 && D.shiftDir > 0) aLoad = load * 0.15;
+  if (D.shiftT > su * 0.4 && D.shiftDir > 0) aLoad = load * 0.15;
   if (cut) aLoad = 0.15;
   D.load = load;
   const wob = D.rpm < P.idle + 250 ? P.wob * (Math.sin(D.t * 7.3) + 0.6 * Math.sin(D.t * 11.9 + 1)) : 0;
@@ -383,27 +412,29 @@ function calGps(c, ga, speed) {
 // </core>
 
 const $ = id => document.getElementById(id);
-const S = { running: false, simOnly: false, engine: 'v8', vol: 1.2, sens: 1, sim: false, thr: 0, brake: false,
+const S = { running: false, simOnly: false, engine: 'm4', vol: 1.2, sens: 1, lead: 0.22, sim: false, thr: 0, brake: false,
             af: 0, gpsA: 0, motionOk: false, lastMotion: 0, tm: 0, steady: false, watch: null };
 const D = newDrive();
 const C = newCal();
 const G = { ok: false, v: 0, last: 0, denied: false };
 
 try {
-  const p = JSON.parse(localStorage.getItem('phantom-engine') || '{}');
+  const p = JSON.parse(localStorage.getItem('phantom-engine-2') || '{}');
   if (PROFILES[p.engine]) S.engine = p.engine;
   if (p.vol >= 0 && p.vol <= 2) S.vol = p.vol;
   if (p.sens >= 0.4 && p.sens <= 2.5) S.sens = p.sens;
+  if (p.lead >= 0 && p.lead <= 0.6) S.lead = p.lead;
 } catch (e) {}
-const savePrefs = () => { try { localStorage.setItem('phantom-engine', JSON.stringify({ engine: S.engine, vol: S.vol, sens: S.sens })); } catch (e) {} };
+const savePrefs = () => { try { localStorage.setItem('phantom-engine-2', JSON.stringify({ engine: S.engine, vol: S.vol, sens: S.sens, lead: S.lead })); } catch (e) {} };
 
 // ---- audio ----
 let ctx = null, node = null, master = null, rpmParam = null, loadParam = null, wake = null, timer = null, raf = 0, lastT = 0;
+let prevRpm = 0, dRpm = 0;
 
 function pushProfile() {
   if (!node) return;
   const P = PROFILES[S.engine];
-  node.port.postMessage({ cyl: P.cyl, rough: P.rough, bright: P.bright, drive: P.drive, pipe: P.pipe, noise: P.noise, pops: P.pops, redline: P.redline });
+  node.port.postMessage({ cyl: P.cyl, rough: P.rough, bright: P.bright, drive: P.drive, pipe: P.pipe, noise: P.noise, pops: P.pops, redline: P.redline, turbo: P.turbo || 0 });
 }
 
 async function start(simOnly) {
@@ -437,7 +468,7 @@ async function start(simOnly) {
     }
     await ctx.resume();
     master.gain.setTargetAtTime(S.vol, ctx.currentTime, 0.15);
-    Object.assign(D, newDrive());
+    Object.assign(D, newDrive()); prevRpm = D.rpm; dRpm = 0;
     S.running = true; S.simOnly = !!simOnly; S.motionOk = false; S.startedAt = performance.now();
     S.gpsA = 0; S.steady = false; G.ok = false; G.last = 0;
     if (!simOnly) startSensors(motionAllowed);
@@ -498,7 +529,7 @@ function onMotion(e) {
   S.motionOk = true; S.lastMotion = t;
   const fresh = G.ok && (t - G.last) < 3000;
   const af = calStep(C, [a.x, a.y, a.z], dt, t, { steady: S.steady && fresh, gpsFresh: fresh, speed: G.v });
-  S.af += (af - S.af) * (1 - Math.exp(-dt / 0.12));
+  S.af += (af - S.af) * (1 - Math.exp(-dt / 0.07));
 }
 
 function onGps(p) {
@@ -527,7 +558,7 @@ function tick() {
   let inp;
   if (S.sim) {
     const v = D.v, thr = S.thr;
-    const a = thr * 4.5 * (1 - v / 75) - 0.0006 * v * v - (v > 0.3 ? 0.15 : 0) - (S.brake ? 7 : 0);
+    const a = thr * (P.simA || 4.5) * (1 - v / (P.simV || 75)) - 0.0006 * v * v - (v > 0.3 ? 0.15 : 0) - (S.brake ? 7 : 0);
     inp = { mode: 'sim', af: a, throttle: S.brake ? 0.03 : 0.08 + 0.92 * thr, sens: S.sens };
   } else {
     const fresh = G.ok && (t - G.last) < 3000;
@@ -537,9 +568,16 @@ function tick() {
             afLoad: !ready && fresh ? S.gpsA : null }; // before calibration, GPS acceleration drives the throttle feel
   }
   const o = stepDrive(D, P, inp, dt);
+  // Bluetooth delays the sound, so send the rpm the engine will have a moment from now.
+  let rpmOut = o.rpm;
+  if (S.lead > 0) {
+    dRpm += ((o.rpm - prevRpm) / dt - dRpm) * (1 - Math.exp(-dt / 0.09));
+    rpmOut = clamp(o.rpm + clamp(dRpm, -6000, 9000) * S.lead, 0, P.redline);
+  }
+  prevRpm = o.rpm;
   const now = ctx.currentTime;
-  rpmParam.setTargetAtTime(o.rpm, now, 0.02);
-  loadParam.setTargetAtTime(o.load, now, 0.03);
+  rpmParam.setTargetAtTime(rpmOut, now, 0.012);
+  loadParam.setTargetAtTime(o.load, now, 0.02);
   S.accShown = inp.af;
 }
 
@@ -680,6 +718,10 @@ $('vol').addEventListener('input', e => {
 $('sens').value = Math.round(S.sens * 100);
 $('sensOut').textContent = Math.round(S.sens * 100) + '%';
 $('sens').addEventListener('input', e => { S.sens = e.target.value / 100; $('sensOut').textContent = e.target.value + '%'; savePrefs(); });
+
+$('lead').value = Math.round(S.lead * 1000);
+$('leadOut').textContent = Math.round(S.lead * 1000) + ' ms';
+$('lead').addEventListener('input', e => { S.lead = e.target.value / 1000; $('leadOut').textContent = e.target.value + ' ms'; savePrefs(); });
 
 $('recal').addEventListener('click', () => { if (S.running && !S.simOnly) { S.msg = ''; calBegin(C, performance.now()); S.af = 0; } });
 $('flip').addEventListener('click', () => { C.flip *= -1; });
